@@ -21,37 +21,62 @@ class JoinFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
+        self.partial_tops_by_query = {}
 
-    def _build_final_top(self, partial_top):
-        fruit_items = [
-            fruit_item.FruitItem(current_fruit, current_amount)
-            for current_fruit, current_amount in partial_top
-        ]
-        fruit_items.sort(reverse=True)
-        final_top_items = fruit_items[:TOP_SIZE]
+    def _get_query_partials(self, query_id):
+        if query_id not in self.partial_tops_by_query:
+            self.partial_tops_by_query[query_id] = {}
+        return self.partial_tops_by_query[query_id]
+
+    def _build_final_top(self, partial_top_by_aggregation):
+        merged_by_fruit = {}
+
+        for partial_top in partial_top_by_aggregation.values():
+            for current_fruit, current_amount in partial_top:
+                current_item = fruit_item.FruitItem(current_fruit, current_amount)
+                merged_by_fruit[current_fruit] = merged_by_fruit.get(
+                    current_fruit,
+                    fruit_item.FruitItem(current_fruit, 0),
+                ) + current_item
+
+        final_top_items = sorted(merged_by_fruit.values(), reverse=True)[:TOP_SIZE]
         return [
             (current_item.fruit, current_item.amount) for current_item in final_top_items
         ]
+
+    def _process_partial_top(self, query_id, source_id, partial_top):
+        logging.info("Processing partial top message")
+
+        partials = self._get_query_partials(query_id)
+        partials[source_id] = partial_top
+
+        if len(partials) < AGGREGATION_AMOUNT:
+            return
+
+        final_top = self._build_final_top(partials)
+        output_message = message_protocol.internal.build_final_top_message(
+            query_id,
+            final_top,
+        )
+        self.output_queue.send(message_protocol.internal.serialize(output_message))
+        self.partial_tops_by_query.pop(query_id, None)
 
     def process_messsage(self, message, ack, nack):
         try:
             logging.info("Processing message")
             internal_message = message_protocol.internal.deserialize(message)
+            source = message_protocol.internal.get_source(internal_message)
 
             if not message_protocol.internal.is_partial_top_message(internal_message):
                 logging.error("Unsupported message type received in join")
                 nack()
                 return
 
-            query_id = message_protocol.internal.get_query_id(internal_message)
-            partial_top = message_protocol.internal.get_payload(internal_message)
-            final_top = self._build_final_top(partial_top)
-
-            output_message = message_protocol.internal.build_final_top_message(
-                query_id,
-                final_top,
+            self._process_partial_top(
+                message_protocol.internal.get_query_id(internal_message),
+                source["id"],
+                message_protocol.internal.get_payload(internal_message),
             )
-            self.output_queue.send(message_protocol.internal.serialize(output_message))
             ack()
         except Exception as exc:
             logging.error(exc)

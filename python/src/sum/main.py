@@ -1,4 +1,5 @@
 import os
+import hashlib
 import logging
 
 from common import middleware, message_protocol, fruit_item
@@ -25,13 +26,16 @@ class SumFilter:
             )
             self.data_output_exchanges.append(data_output_exchange)
 
-        # State is kept per query to avoid mixing concurrent clients.
         self.amount_by_fruit_by_query = {}
 
     def _get_query_state(self, query_id):
         if query_id not in self.amount_by_fruit_by_query:
             self.amount_by_fruit_by_query[query_id] = {}
         return self.amount_by_fruit_by_query[query_id]
+
+    def _get_aggregation_index(self, fruit):
+        digest = hashlib.sha256(fruit.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], byteorder="big") % AGGREGATION_AMOUNT
 
     def _process_data(self, query_id, fruit, amount):
         logging.info("Processing data message")
@@ -46,6 +50,7 @@ class SumFilter:
         query_state = self.amount_by_fruit_by_query.get(query_id, {})
 
         for final_fruit_item in query_state.values():
+            aggregation_index = self._get_aggregation_index(final_fruit_item.fruit)
             message = message_protocol.internal.build_message(
                 message_protocol.internal.TYPE_DATA,
                 query_id,
@@ -57,9 +62,7 @@ class SumFilter:
                 },
             )
             serialized_message = message_protocol.internal.serialize(message)
-
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(serialized_message)
+            self.data_output_exchanges[aggregation_index].send(serialized_message)
 
         eof_message = message_protocol.internal.build_eof_message(
             query_id,
