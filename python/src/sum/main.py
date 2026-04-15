@@ -65,14 +65,17 @@ class SumFilter:
         assert isinstance(fruit, str)
         assert fruit
 
+        # Deterministic partitioning avoids broadcasting the same fruit to all aggregations.
         digest = hashlib.sha256(fruit.encode("utf-8")).digest()
-        aggregation_index = int.from_bytes(digest[:8], byteorder="big") % AGGREGATION_AMOUNT
+        aggregation_index = int.from_bytes(
+            digest[:8], byteorder="big"
+        ) % AGGREGATION_AMOUNT
         assert 0 <= aggregation_index < AGGREGATION_AMOUNT
         return aggregation_index
 
     def _process_data(self, query_id, fruit, amount):
         self._cleanup_closed_queries()
-        logging.info("Processing data message for query %s", query_id)
+        logging.debug("Processing data message for query %s", query_id)
 
         assert isinstance(query_id, str)
         assert query_id
@@ -82,7 +85,7 @@ class SumFilter:
         assert amount >= 0
 
         if query_id in self.closed_queries:
-            logging.info("Ignoring late data for closed query %s", query_id)
+            logging.debug("Ignoring late data for closed query %s", query_id)
             return
 
         query_state = self._get_query_state(query_id)
@@ -93,6 +96,8 @@ class SumFilter:
     def _emit_query_results(self, query_id):
         assert isinstance(query_id, str)
         assert query_id
+
+        logging.info("Emitting local sum results for query %s", query_id)
 
         query_state = dict(self.amount_by_fruit_by_query.get(query_id, {}))
         self.amount_by_fruit_by_query.pop(query_id, None)
@@ -116,6 +121,8 @@ class SumFilter:
         assert isinstance(query_id, str)
         assert query_id
 
+        logging.info("Emitting EOF to aggregations for query %s", query_id)
+
         eof_message = message_protocol.internal.build_eof_message(
             query_id,
             message_protocol.internal.ROLE_SUM,
@@ -137,6 +144,7 @@ class SumFilter:
         assert all(0 <= sum_id < SUM_AMOUNT for sum_id in visited_sum_ids)
 
         if len(visited_sum_ids) >= SUM_AMOUNT:
+            logging.info("EOF token completed traversal for query %s", query_id)
             return
 
         eof_message = message_protocol.internal.build_eof_message(
@@ -161,6 +169,8 @@ class SumFilter:
         assert all(isinstance(sum_id, int) for sum_id in visited_sum_ids)
         assert all(0 <= sum_id < SUM_AMOUNT for sum_id in visited_sum_ids)
 
+        # The EOF token traverses the shared input queue so each sum closes exactly once
+        # while preserving the relative order between data and query termination.
         logging.info(
             "Processing EOF token for query %s with visited sums %s",
             query_id,

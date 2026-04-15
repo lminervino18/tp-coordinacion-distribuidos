@@ -52,7 +52,7 @@ class AggregationFilter:
         return self.completed_sums_by_query[query_id]
 
     def _process_data(self, query_id, fruit, amount):
-        logging.info("Processing data message for query %s", query_id)
+        logging.debug("Processing data message for query %s", query_id)
 
         assert isinstance(query_id, str)
         assert query_id
@@ -69,6 +69,8 @@ class AggregationFilter:
     def _emit_partial_top(self, query_id):
         assert isinstance(query_id, str)
         assert query_id
+
+        logging.info("Emitting partial top for query %s", query_id)
 
         query_amounts = self.amount_by_fruit_by_query.get(query_id, {})
         fruit_items = sorted(query_amounts.values(), reverse=True)
