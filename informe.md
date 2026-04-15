@@ -37,3 +37,17 @@ Sobre la misma lógica, el componente `Join` fue rediseñado para esperar un res
 Desde el punto de vista arquitectónico, esta solución reemplaza un esquema de difusión masiva por uno de distribución controlada y sincronización explícita. El sistema deja de replicar innecesariamente datos y pasa a coordinar el cierre de cada etapa en función de la cantidad real de réplicas participantes. Esto mejora tanto la eficiencia del procesamiento como la corrección del flujo distribuido.
 
 En conclusión, la segunda mejora consistió en transformar una coordinación basada en broadcast y finalización implícita en un modelo de particionado determinístico con sincronización por etapas. Esta decisión permitió reducir drásticamente la redundancia de datos y cómputo, al mismo tiempo que garantizó que tanto `Aggregation` como `Join` trabajen únicamente sobre resultados completos y consistentes.
+
+## Problema 3 Detectado y Estrategia de Solución
+
+Al escalar la etapa `Sum` con múltiples réplicas se detectó un problema de coordinación asociado al cierre de consultas. La implementación original utilizaba un único mensaje de fin de datos (`EOF`) enviado al finalizar cada pedido. Sin embargo, al existir una cola compartida entre varias instancias de `Sum`, dicho mensaje era consumido únicamente por una de ellas. Esto provocaba que solo una réplica cerrara correctamente la consulta, mientras las demás continuaban esperando indefinidamente o no enviaban sus resultados parciales.
+
+Una primera alternativa considerada fue realizar un broadcast del `EOF` hacia todas las réplicas. Si bien esto resolvía la falta de notificación, introducía un nuevo inconveniente: al circular por un canal distinto al de los datos, el mensaje de cierre podía adelantarse a registros todavía pendientes de procesamiento. En consecuencia, algunas instancias podían cerrar una consulta antes de tiempo y generar resultados incompletos.
+
+Para evitar ambos problemas se implementó un mecanismo de coordinación basado en un **token de cierre distribuido**. En este esquema, el `EOF` se envía por la misma cola compartida que transporta los datos normales, preservando así el orden lógico del flujo. Cada instancia de `Sum`, al recibir dicho token por primera vez para una consulta determinada, realiza tres acciones: emite sus acumulados parciales hacia `Aggregation`, notifica su finalización a las instancias siguientes y vuelve a insertar el token en la cola para que continúe recorriendo las demás réplicas.
+
+De esta forma, todas las instancias participan exactamente una vez del cierre de la consulta sin necesidad de canales adicionales ni conocimiento externo de la topología del sistema. La coordinación queda contenida dentro del propio flujo distribuido.
+
+Como principal ventaja, esta solución mantiene el rol original de `Sum` como etapa de reducción local, preserva la corrección de resultados y evita depender de configuraciones externas que podrían cambiar durante la evaluación. Además, escala naturalmente al aumentar la cantidad de réplicas.
+
+Como contrapartida, el cierre de una consulta deja de ser inmediato, ya que el token debe recorrer las distintas instancias antes de completarse. Esto agrega una pequeña latencia al final del procesamiento, aunque su impacto es bajo debido a que la cantidad de mensajes de control es muy reducida frente al volumen total de datos procesados. En la práctica, se consideró un intercambio razonable entre simplicidad, robustez y escalabilidad.

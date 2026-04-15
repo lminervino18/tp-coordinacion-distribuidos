@@ -45,13 +45,15 @@ def build_data_message(query_id, fruit, amount):
     )
 
 
-def build_eof_message(query_id, source_role, source_id):
+def build_eof_message(query_id, source_role, source_id, visited_sum_ids=None):
     return build_message(
         TYPE_EOF,
         query_id,
         source_role,
         source_id,
-        None,
+        {
+            "visited_sum_ids": visited_sum_ids or [],
+        },
     )
 
 

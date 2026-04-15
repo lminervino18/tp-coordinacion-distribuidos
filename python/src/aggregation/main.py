@@ -1,6 +1,5 @@
 import os
 import logging
-import bisect
 
 from common import middleware, message_protocol, fruit_item
 
@@ -22,13 +21,13 @@ class AggregationFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
-        self.fruit_top_by_query = {}
+        self.amount_by_fruit_by_query = {}
         self.completed_sums_by_query = {}
 
-    def _get_query_top(self, query_id):
-        if query_id not in self.fruit_top_by_query:
-            self.fruit_top_by_query[query_id] = []
-        return self.fruit_top_by_query[query_id]
+    def _get_query_amounts(self, query_id):
+        if query_id not in self.amount_by_fruit_by_query:
+            self.amount_by_fruit_by_query[query_id] = {}
+        return self.amount_by_fruit_by_query[query_id]
 
     def _get_completed_sums(self, query_id):
         if query_id not in self.completed_sums_by_query:
@@ -37,23 +36,20 @@ class AggregationFilter:
 
     def _process_data(self, query_id, fruit, amount):
         logging.info("Processing data message")
-        fruit_top = self._get_query_top(query_id)
 
-        for index in range(len(fruit_top)):
-            if fruit_top[index].fruit == fruit:
-                fruit_top[index] = fruit_top[index] + fruit_item.FruitItem(fruit, amount)
-                return
-
-        bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
+        query_amounts = self._get_query_amounts(query_id)
+        query_amounts[fruit] = query_amounts.get(
+            fruit, fruit_item.FruitItem(fruit, 0)
+        ) + fruit_item.FruitItem(fruit, int(amount))
 
     def _emit_partial_top(self, query_id):
-        fruit_top = self.fruit_top_by_query.get(query_id, [])
-        fruit_chunk = list(fruit_top[-TOP_SIZE:])
-        fruit_chunk.reverse()
+        query_amounts = self.amount_by_fruit_by_query.get(query_id, {})
+        fruit_items = sorted(query_amounts.values(), reverse=True)
+        fruit_items = fruit_items[:TOP_SIZE]
 
         partial_top = [
             (current_fruit_item.fruit, current_fruit_item.amount)
-            for current_fruit_item in fruit_chunk
+            for current_fruit_item in fruit_items
         ]
 
         message = message_protocol.internal.build_partial_top_message(
@@ -73,7 +69,7 @@ class AggregationFilter:
             return
 
         self._emit_partial_top(query_id)
-        self.fruit_top_by_query.pop(query_id, None)
+        self.amount_by_fruit_by_query.pop(query_id, None)
         self.completed_sums_by_query.pop(query_id, None)
 
     def process_messsage(self, message, ack, nack):

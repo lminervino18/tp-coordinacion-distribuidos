@@ -21,6 +21,7 @@ class MessageHandler:
             self.query_id,
             message_protocol.internal.ROLE_GATEWAY,
             None,
+            [],
         )
         return message_protocol.internal.serialize(internal_message)
 
