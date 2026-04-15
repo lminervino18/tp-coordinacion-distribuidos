@@ -1,6 +1,5 @@
 import os
 import logging
-import threading
 
 from common import middleware, message_protocol, fruit_item
 
@@ -13,6 +12,7 @@ SUM_CONTROL_EXCHANGE = "SUM_CONTROL_EXCHANGE"
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
+
 class SumFilter:
     def __init__(self):
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
@@ -24,39 +24,84 @@ class SumFilter:
                 MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
             )
             self.data_output_exchanges.append(data_output_exchange)
-        self.amount_by_fruit = {}
 
-    def _process_data(self, fruit, amount):
-        logging.info(f"Process data")
-        self.amount_by_fruit[fruit] = self.amount_by_fruit.get(
+        # State is kept per query to avoid mixing concurrent clients.
+        self.amount_by_fruit_by_query = {}
+
+    def _get_query_state(self, query_id):
+        if query_id not in self.amount_by_fruit_by_query:
+            self.amount_by_fruit_by_query[query_id] = {}
+        return self.amount_by_fruit_by_query[query_id]
+
+    def _process_data(self, query_id, fruit, amount):
+        logging.info("Processing data message")
+        query_state = self._get_query_state(query_id)
+        query_state[fruit] = query_state.get(
             fruit, fruit_item.FruitItem(fruit, 0)
         ) + fruit_item.FruitItem(fruit, int(amount))
 
-    def _process_eof(self):
-        logging.info(f"Broadcasting data messages")
-        for final_fruit_item in self.amount_by_fruit.values():
+    def _process_eof(self, query_id):
+        logging.info("Processing EOF message")
+
+        query_state = self.amount_by_fruit_by_query.get(query_id, {})
+
+        for final_fruit_item in query_state.values():
+            message = message_protocol.internal.build_message(
+                message_protocol.internal.TYPE_DATA,
+                query_id,
+                message_protocol.internal.ROLE_SUM,
+                ID,
+                {
+                    "fruit": final_fruit_item.fruit,
+                    "amount": final_fruit_item.amount,
+                },
+            )
+            serialized_message = message_protocol.internal.serialize(message)
+
             for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        [final_fruit_item.fruit, final_fruit_item.amount]
-                    )
-                )
+                data_output_exchange.send(serialized_message)
 
-        logging.info(f"Broadcasting EOF message")
+        eof_message = message_protocol.internal.build_eof_message(
+            query_id,
+            message_protocol.internal.ROLE_SUM,
+            ID,
+        )
+        serialized_eof = message_protocol.internal.serialize(eof_message)
+
         for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([]))
+            data_output_exchange.send(serialized_eof)
 
+        if query_id in self.amount_by_fruit_by_query:
+            del self.amount_by_fruit_by_query[query_id]
 
     def process_data_messsage(self, message, ack, nack):
-        fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 2:
-            self._process_data(*fields)
-        else:
-            self._process_eof(*fields)
-        ack()
+        try:
+            internal_message = message_protocol.internal.deserialize(message)
+
+            if message_protocol.internal.is_data_message(internal_message):
+                payload = message_protocol.internal.get_payload(internal_message)
+                self._process_data(
+                    message_protocol.internal.get_query_id(internal_message),
+                    payload["fruit"],
+                    payload["amount"],
+                )
+            elif message_protocol.internal.is_eof_message(internal_message):
+                self._process_eof(
+                    message_protocol.internal.get_query_id(internal_message)
+                )
+            else:
+                logging.error("Unsupported message type received in sum")
+                nack()
+                return
+
+            ack()
+        except Exception as exc:
+            logging.error(exc)
+            nack()
 
     def start(self):
         self.input_queue.start_consuming(self.process_data_messsage)
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
