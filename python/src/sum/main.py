@@ -1,4 +1,6 @@
 import os
+import time
+import signal
 import hashlib
 import logging
 
@@ -9,9 +11,10 @@ MOM_HOST = os.environ["MOM_HOST"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 SUM_AMOUNT = int(os.environ["SUM_AMOUNT"])
 SUM_PREFIX = os.environ["SUM_PREFIX"]
-SUM_CONTROL_EXCHANGE = "SUM_CONTROL_EXCHANGE"
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
+
+_CLOSED_QUERY_TTL_SECONDS = 300
 
 
 class SumFilter:
@@ -28,7 +31,18 @@ class SumFilter:
             self.data_output_exchanges.append(data_output_exchange)
 
         self.amount_by_fruit_by_query = {}
-        self.closed_queries = set()
+        self.closed_queries = {}
+
+    def _cleanup_closed_queries(self):
+        now = time.monotonic()
+        expired_query_ids = [
+            query_id
+            for query_id, closed_at in self.closed_queries.items()
+            if now - closed_at > _CLOSED_QUERY_TTL_SECONDS
+        ]
+
+        for query_id in expired_query_ids:
+            self.closed_queries.pop(query_id, None)
 
     def _get_query_state(self, query_id):
         if query_id not in self.amount_by_fruit_by_query:
@@ -40,9 +54,11 @@ class SumFilter:
         return int.from_bytes(digest[:8], byteorder="big") % AGGREGATION_AMOUNT
 
     def _process_data(self, query_id, fruit, amount):
-        logging.info("Processing data message")
+        self._cleanup_closed_queries()
+        logging.info("Processing data message for query %s", query_id)
 
         if query_id in self.closed_queries:
+            logging.info("Ignoring late data for closed query %s", query_id)
             return
 
         query_state = self._get_query_state(query_id)
@@ -94,11 +110,17 @@ class SumFilter:
         self.input_queue.send(message_protocol.internal.serialize(eof_message))
 
     def _process_eof(self, internal_message):
-        logging.info("Processing EOF message")
+        self._cleanup_closed_queries()
 
         query_id = message_protocol.internal.get_query_id(internal_message)
         payload = message_protocol.internal.get_payload(internal_message) or {}
         visited_sum_ids = list(payload.get("visited_sum_ids", []))
+
+        logging.info(
+            "Processing EOF token for query %s with visited sums %s",
+            query_id,
+            visited_sum_ids,
+        )
 
         if ID in visited_sum_ids:
             self._requeue_eof_token(query_id, visited_sum_ids)
@@ -106,7 +128,8 @@ class SumFilter:
 
         self._emit_query_results(query_id)
         self._emit_eof_to_aggregations(query_id)
-        self.closed_queries.add(query_id)
+        self.closed_queries[query_id] = time.monotonic()
+
         visited_sum_ids.append(ID)
         self._requeue_eof_token(query_id, visited_sum_ids)
 
@@ -136,11 +159,50 @@ class SumFilter:
     def start(self):
         self.input_queue.start_consuming(self.process_data_messsage)
 
+    def request_shutdown(self):
+        try:
+            self.input_queue.stop_consuming()
+        except Exception as exc:
+            logging.error(exc)
+
+    def close(self):
+        close_errors = []
+
+        try:
+            self.input_queue.close()
+        except Exception as exc:
+            logging.error(exc)
+            close_errors.append(exc)
+
+        for data_output_exchange in self.data_output_exchanges:
+            try:
+                data_output_exchange.close()
+            except Exception as exc:
+                logging.error(exc)
+                close_errors.append(exc)
+
+        if close_errors:
+            raise close_errors[0]
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
-    sum_filter.start()
+
+    def _handle_sigterm(signum, frame):
+        logging.info("Received SIGTERM signal")
+        sum_filter.request_shutdown()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    try:
+        sum_filter.start()
+    finally:
+        try:
+            sum_filter.close()
+        except Exception as exc:
+            logging.error(exc)
+
     return 0
 
 

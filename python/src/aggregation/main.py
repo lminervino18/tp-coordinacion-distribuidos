@@ -1,4 +1,5 @@
 import os
+import signal
 import logging
 
 from common import middleware, message_protocol, fruit_item
@@ -35,7 +36,7 @@ class AggregationFilter:
         return self.completed_sums_by_query[query_id]
 
     def _process_data(self, query_id, fruit, amount):
-        logging.info("Processing data message")
+        logging.info("Processing data message for query %s", query_id)
 
         query_amounts = self._get_query_amounts(query_id)
         query_amounts[fruit] = query_amounts.get(
@@ -60,10 +61,15 @@ class AggregationFilter:
         self.output_queue.send(message_protocol.internal.serialize(message))
 
     def _process_eof(self, query_id, source_id):
-        logging.info("Processing EOF message")
-
         completed_sums = self._get_completed_sums(query_id)
         completed_sums.add(source_id)
+
+        logging.info(
+            "Processing EOF for query %s: %d/%d sums completed",
+            query_id,
+            len(completed_sums),
+            SUM_AMOUNT,
+        )
 
         if len(completed_sums) < SUM_AMOUNT:
             return
@@ -74,7 +80,6 @@ class AggregationFilter:
 
     def process_messsage(self, message, ack, nack):
         try:
-            logging.info("Processing message")
             internal_message = message_protocol.internal.deserialize(message)
             source = message_protocol.internal.get_source(internal_message)
 
@@ -103,11 +108,49 @@ class AggregationFilter:
     def start(self):
         self.input_exchange.start_consuming(self.process_messsage)
 
+    def request_shutdown(self):
+        try:
+            self.input_exchange.stop_consuming()
+        except Exception as exc:
+            logging.error(exc)
+
+    def close(self):
+        close_errors = []
+
+        try:
+            self.input_exchange.close()
+        except Exception as exc:
+            logging.error(exc)
+            close_errors.append(exc)
+
+        try:
+            self.output_queue.close()
+        except Exception as exc:
+            logging.error(exc)
+            close_errors.append(exc)
+
+        if close_errors:
+            raise close_errors[0]
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
     aggregation_filter = AggregationFilter()
-    aggregation_filter.start()
+
+    def _handle_sigterm(signum, frame):
+        logging.info("Received SIGTERM signal")
+        aggregation_filter.request_shutdown()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    try:
+        aggregation_filter.start()
+    finally:
+        try:
+            aggregation_filter.close()
+        except Exception as exc:
+            logging.error(exc)
+
     return 0
 
 

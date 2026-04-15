@@ -1,4 +1,5 @@
 import os
+import signal
 import logging
 
 from common import middleware, message_protocol, fruit_item
@@ -45,7 +46,12 @@ class JoinFilter:
         ]
 
     def _process_partial_top(self, query_id, source_id, partial_top):
-        logging.info("Processing partial top message")
+        logging.info(
+            "Processing partial top for query %s: aggregation %d/%d",
+            query_id,
+            len(self._get_query_partials(query_id)) + 1,
+            AGGREGATION_AMOUNT,
+        )
 
         partials = self._get_query_partials(query_id)
         partials[source_id] = partial_top
@@ -63,7 +69,6 @@ class JoinFilter:
 
     def process_messsage(self, message, ack, nack):
         try:
-            logging.info("Processing message")
             internal_message = message_protocol.internal.deserialize(message)
             source = message_protocol.internal.get_source(internal_message)
 
@@ -85,11 +90,48 @@ class JoinFilter:
     def start(self):
         self.input_queue.start_consuming(self.process_messsage)
 
+    def request_shutdown(self):
+        try:
+            self.input_queue.stop_consuming()
+        except Exception as exc:
+            logging.error(exc)
+
+    def close(self):
+        close_errors = []
+
+        try:
+            self.input_queue.close()
+        except Exception as exc:
+            logging.error(exc)
+            close_errors.append(exc)
+
+        try:
+            self.output_queue.close()
+        except Exception as exc:
+            logging.error(exc)
+            close_errors.append(exc)
+
+        if close_errors:
+            raise close_errors[0]
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
     join_filter = JoinFilter()
-    join_filter.start()
+
+    def _handle_sigterm(signum, frame):
+        logging.info("Received SIGTERM signal")
+        join_filter.request_shutdown()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    try:
+        join_filter.start()
+    finally:
+        try:
+            join_filter.close()
+        except Exception as exc:
+            logging.error(exc)
 
     return 0
 

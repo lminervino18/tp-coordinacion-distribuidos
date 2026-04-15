@@ -1,8 +1,8 @@
 import os
-import logging
 import csv
-import socket
 import signal
+import socket
+import logging
 
 from common import message_protocol
 
@@ -13,17 +13,17 @@ SERVER_PORT = int(os.environ["SERVER_PORT"])
 
 
 class Client:
-
     def __init__(self):
         self.closed = False
+        self.server_socket = None
         self._prev_sigterm_handler = signal.signal(signal.SIGTERM, self.handle_sigterm)
 
     def handle_sigterm(self, signum, frame):
-        logging.info("Recieved SIGTERM signal")
+        logging.info("Received SIGTERM signal")
         self.closed = True
         self.disconnect()
 
-        if self._prev_sigterm_handler:
+        if callable(self._prev_sigterm_handler):
             self._prev_sigterm_handler(signum, frame)
 
     def connect(self, server_host, server_port):
@@ -31,8 +31,19 @@ class Client:
         self.server_socket.connect((server_host, server_port))
 
     def disconnect(self):
-        if self.server_socket:
+        if self.server_socket is None:
+            return
+
+        try:
             self.server_socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        finally:
+            try:
+                self.server_socket.close()
+            except OSError:
+                pass
+            self.server_socket = None
 
     def send_fruit_records(self, input_file):
         logging.info("Sending fruit records")
@@ -81,12 +92,11 @@ def main() -> int:
         if not client.closed:
             logging.error("The connection with the server was lost")
             return 1
-    except Exception as e:
-        logging.error(e)
+    except Exception as exc:
+        logging.error(exc)
         return 2
     finally:
-        if not client.closed:
-            client.disconnect()
+        client.disconnect()
 
     return 0
 
