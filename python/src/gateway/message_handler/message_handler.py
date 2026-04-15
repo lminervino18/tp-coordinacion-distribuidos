@@ -6,9 +6,15 @@ from common import message_protocol
 class MessageHandler:
     def __init__(self):
         self.query_id = str(uuid.uuid4())
+        assert self.query_id
 
     def serialize_data_message(self, message):
         fruit, amount = message
+        assert isinstance(fruit, str)
+        assert fruit
+        assert isinstance(amount, int)
+        assert amount >= 0
+
         internal_message = message_protocol.internal.build_data_message(
             self.query_id,
             fruit,
@@ -35,4 +41,5 @@ class MessageHandler:
             return None
 
         payload = message_protocol.internal.get_payload(internal_message)
+        assert isinstance(payload, list)
         return payload

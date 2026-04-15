@@ -13,6 +13,16 @@ AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 TOP_SIZE = int(os.environ["TOP_SIZE"])
 
+assert ID >= 0
+assert SUM_AMOUNT > 0
+assert AGGREGATION_AMOUNT > 0
+assert TOP_SIZE > 0
+assert ID < AGGREGATION_AMOUNT
+assert MOM_HOST
+assert OUTPUT_QUEUE
+assert SUM_PREFIX
+assert AGGREGATION_PREFIX
+
 
 class AggregationFilter:
     def __init__(self):
@@ -26,11 +36,17 @@ class AggregationFilter:
         self.completed_sums_by_query = {}
 
     def _get_query_amounts(self, query_id):
+        assert isinstance(query_id, str)
+        assert query_id
+
         if query_id not in self.amount_by_fruit_by_query:
             self.amount_by_fruit_by_query[query_id] = {}
         return self.amount_by_fruit_by_query[query_id]
 
     def _get_completed_sums(self, query_id):
+        assert isinstance(query_id, str)
+        assert query_id
+
         if query_id not in self.completed_sums_by_query:
             self.completed_sums_by_query[query_id] = set()
         return self.completed_sums_by_query[query_id]
@@ -38,15 +54,27 @@ class AggregationFilter:
     def _process_data(self, query_id, fruit, amount):
         logging.info("Processing data message for query %s", query_id)
 
+        assert isinstance(query_id, str)
+        assert query_id
+        assert isinstance(fruit, str)
+        assert fruit
+        assert isinstance(amount, int)
+        assert amount >= 0
+
         query_amounts = self._get_query_amounts(query_id)
         query_amounts[fruit] = query_amounts.get(
             fruit, fruit_item.FruitItem(fruit, 0)
         ) + fruit_item.FruitItem(fruit, int(amount))
 
     def _emit_partial_top(self, query_id):
+        assert isinstance(query_id, str)
+        assert query_id
+
         query_amounts = self.amount_by_fruit_by_query.get(query_id, {})
         fruit_items = sorted(query_amounts.values(), reverse=True)
         fruit_items = fruit_items[:TOP_SIZE]
+
+        assert len(fruit_items) <= TOP_SIZE
 
         partial_top = [
             (current_fruit_item.fruit, current_fruit_item.amount)
@@ -61,6 +89,11 @@ class AggregationFilter:
         self.output_queue.send(message_protocol.internal.serialize(message))
 
     def _process_eof(self, query_id, source_id):
+        assert isinstance(query_id, str)
+        assert query_id
+        assert isinstance(source_id, int)
+        assert 0 <= source_id < SUM_AMOUNT
+
         completed_sums = self._get_completed_sums(query_id)
         completed_sums.add(source_id)
 
@@ -70,6 +103,8 @@ class AggregationFilter:
             len(completed_sums),
             SUM_AMOUNT,
         )
+
+        assert len(completed_sums) <= SUM_AMOUNT
 
         if len(completed_sums) < SUM_AMOUNT:
             return
@@ -83,8 +118,19 @@ class AggregationFilter:
             internal_message = message_protocol.internal.deserialize(message)
             source = message_protocol.internal.get_source(internal_message)
 
+            assert source["role"] in {
+                message_protocol.internal.ROLE_GATEWAY,
+                message_protocol.internal.ROLE_SUM,
+                message_protocol.internal.ROLE_AGGREGATION,
+                message_protocol.internal.ROLE_JOIN,
+            }
+
             if message_protocol.internal.is_data_message(internal_message):
                 payload = message_protocol.internal.get_payload(internal_message)
+                assert isinstance(payload, dict)
+                assert "fruit" in payload
+                assert "amount" in payload
+
                 self._process_data(
                     message_protocol.internal.get_query_id(internal_message),
                     payload["fruit"],

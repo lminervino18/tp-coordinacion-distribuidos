@@ -13,6 +13,15 @@ AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 TOP_SIZE = int(os.environ["TOP_SIZE"])
 
+assert SUM_AMOUNT > 0
+assert AGGREGATION_AMOUNT > 0
+assert TOP_SIZE > 0
+assert MOM_HOST
+assert INPUT_QUEUE
+assert OUTPUT_QUEUE
+assert SUM_PREFIX
+assert AGGREGATION_PREFIX
+
 
 class JoinFilter:
     def __init__(self):
@@ -25,15 +34,28 @@ class JoinFilter:
         self.partial_tops_by_query = {}
 
     def _get_query_partials(self, query_id):
+        assert isinstance(query_id, str)
+        assert query_id
+
         if query_id not in self.partial_tops_by_query:
             self.partial_tops_by_query[query_id] = {}
         return self.partial_tops_by_query[query_id]
 
     def _build_final_top(self, partial_top_by_aggregation):
+        assert isinstance(partial_top_by_aggregation, dict)
+        assert len(partial_top_by_aggregation) == AGGREGATION_AMOUNT
+
         merged_by_fruit = {}
 
         for partial_top in partial_top_by_aggregation.values():
+            assert isinstance(partial_top, list)
+
             for current_fruit, current_amount in partial_top:
+                assert isinstance(current_fruit, str)
+                assert current_fruit
+                assert isinstance(current_amount, int)
+                assert current_amount >= 0
+
                 current_item = fruit_item.FruitItem(current_fruit, current_amount)
                 merged_by_fruit[current_fruit] = merged_by_fruit.get(
                     current_fruit,
@@ -41,11 +63,19 @@ class JoinFilter:
                 ) + current_item
 
         final_top_items = sorted(merged_by_fruit.values(), reverse=True)[:TOP_SIZE]
+        assert len(final_top_items) <= TOP_SIZE
+
         return [
             (current_item.fruit, current_item.amount) for current_item in final_top_items
         ]
 
     def _process_partial_top(self, query_id, source_id, partial_top):
+        assert isinstance(query_id, str)
+        assert query_id
+        assert isinstance(source_id, int)
+        assert 0 <= source_id < AGGREGATION_AMOUNT
+        assert isinstance(partial_top, list)
+
         logging.info(
             "Processing partial top for query %s: aggregation %d/%d",
             query_id,
@@ -55,6 +85,8 @@ class JoinFilter:
 
         partials = self._get_query_partials(query_id)
         partials[source_id] = partial_top
+
+        assert len(partials) <= AGGREGATION_AMOUNT
 
         if len(partials) < AGGREGATION_AMOUNT:
             return
@@ -71,6 +103,13 @@ class JoinFilter:
         try:
             internal_message = message_protocol.internal.deserialize(message)
             source = message_protocol.internal.get_source(internal_message)
+
+            assert source["role"] in {
+                message_protocol.internal.ROLE_GATEWAY,
+                message_protocol.internal.ROLE_SUM,
+                message_protocol.internal.ROLE_AGGREGATION,
+                message_protocol.internal.ROLE_JOIN,
+            }
 
             if not message_protocol.internal.is_partial_top_message(internal_message):
                 logging.error("Unsupported message type received in join")

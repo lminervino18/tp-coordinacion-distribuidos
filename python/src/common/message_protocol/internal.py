@@ -17,10 +17,31 @@ def serialize(message):
 
 
 def deserialize(message):
-    return json.loads(message.decode("utf-8"))
+    decoded_message = json.loads(message.decode("utf-8"))
+    assert isinstance(decoded_message, dict)
+    assert "type" in decoded_message
+    assert "query_id" in decoded_message
+    assert "source" in decoded_message
+    assert "payload" in decoded_message
+    return decoded_message
 
 
 def build_message(message_type, query_id, source_role, source_id, payload):
+    assert message_type in {
+        TYPE_DATA,
+        TYPE_EOF,
+        TYPE_PARTIAL_TOP,
+        TYPE_FINAL_TOP,
+    }
+    assert source_role in {
+        ROLE_GATEWAY,
+        ROLE_SUM,
+        ROLE_AGGREGATION,
+        ROLE_JOIN,
+    }
+    assert isinstance(query_id, str)
+    assert query_id
+
     return {
         "type": message_type,
         "query_id": query_id,
@@ -33,6 +54,11 @@ def build_message(message_type, query_id, source_role, source_id, payload):
 
 
 def build_data_message(query_id, fruit, amount):
+    assert isinstance(fruit, str)
+    assert fruit
+    assert isinstance(amount, int)
+    assert amount >= 0
+
     return build_message(
         TYPE_DATA,
         query_id,
@@ -46,6 +72,8 @@ def build_data_message(query_id, fruit, amount):
 
 
 def build_eof_message(query_id, source_role, source_id, visited_sum_ids=None):
+    assert visited_sum_ids is None or isinstance(visited_sum_ids, list)
+
     return build_message(
         TYPE_EOF,
         query_id,
@@ -58,6 +86,9 @@ def build_eof_message(query_id, source_role, source_id, visited_sum_ids=None):
 
 
 def build_partial_top_message(query_id, source_id, fruit_top):
+    assert isinstance(source_id, int)
+    assert isinstance(fruit_top, list)
+
     return build_message(
         TYPE_PARTIAL_TOP,
         query_id,
@@ -68,6 +99,8 @@ def build_partial_top_message(query_id, source_id, fruit_top):
 
 
 def build_final_top_message(query_id, fruit_top):
+    assert isinstance(fruit_top, list)
+
     return build_message(
         TYPE_FINAL_TOP,
         query_id,
@@ -94,11 +127,18 @@ def is_final_top_message(message):
 
 
 def get_query_id(message):
-    return message["query_id"]
+    query_id = message["query_id"]
+    assert isinstance(query_id, str)
+    assert query_id
+    return query_id
 
 
 def get_source(message):
-    return message["source"]
+    source = message["source"]
+    assert isinstance(source, dict)
+    assert "role" in source
+    assert "id" in source
+    return source
 
 
 def get_payload(message):

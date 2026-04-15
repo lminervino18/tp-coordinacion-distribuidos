@@ -14,6 +14,15 @@ SUM_PREFIX = os.environ["SUM_PREFIX"]
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
+assert ID >= 0
+assert SUM_AMOUNT > 0
+assert AGGREGATION_AMOUNT > 0
+assert ID < SUM_AMOUNT
+assert MOM_HOST
+assert INPUT_QUEUE
+assert SUM_PREFIX
+assert AGGREGATION_PREFIX
+
 _CLOSED_QUERY_TTL_SECONDS = 300
 
 
@@ -45,17 +54,32 @@ class SumFilter:
             self.closed_queries.pop(query_id, None)
 
     def _get_query_state(self, query_id):
+        assert isinstance(query_id, str)
+        assert query_id
+
         if query_id not in self.amount_by_fruit_by_query:
             self.amount_by_fruit_by_query[query_id] = {}
         return self.amount_by_fruit_by_query[query_id]
 
     def _get_aggregation_index(self, fruit):
+        assert isinstance(fruit, str)
+        assert fruit
+
         digest = hashlib.sha256(fruit.encode("utf-8")).digest()
-        return int.from_bytes(digest[:8], byteorder="big") % AGGREGATION_AMOUNT
+        aggregation_index = int.from_bytes(digest[:8], byteorder="big") % AGGREGATION_AMOUNT
+        assert 0 <= aggregation_index < AGGREGATION_AMOUNT
+        return aggregation_index
 
     def _process_data(self, query_id, fruit, amount):
         self._cleanup_closed_queries()
         logging.info("Processing data message for query %s", query_id)
+
+        assert isinstance(query_id, str)
+        assert query_id
+        assert isinstance(fruit, str)
+        assert fruit
+        assert isinstance(amount, int)
+        assert amount >= 0
 
         if query_id in self.closed_queries:
             logging.info("Ignoring late data for closed query %s", query_id)
@@ -67,6 +91,9 @@ class SumFilter:
         ) + fruit_item.FruitItem(fruit, int(amount))
 
     def _emit_query_results(self, query_id):
+        assert isinstance(query_id, str)
+        assert query_id
+
         query_state = dict(self.amount_by_fruit_by_query.get(query_id, {}))
         self.amount_by_fruit_by_query.pop(query_id, None)
 
@@ -86,6 +113,9 @@ class SumFilter:
             self.data_output_exchanges[aggregation_index].send(serialized_message)
 
     def _emit_eof_to_aggregations(self, query_id):
+        assert isinstance(query_id, str)
+        assert query_id
+
         eof_message = message_protocol.internal.build_eof_message(
             query_id,
             message_protocol.internal.ROLE_SUM,
@@ -98,6 +128,14 @@ class SumFilter:
             data_output_exchange.send(serialized_eof)
 
     def _requeue_eof_token(self, query_id, visited_sum_ids):
+        assert isinstance(query_id, str)
+        assert query_id
+        assert isinstance(visited_sum_ids, list)
+        assert len(set(visited_sum_ids)) == len(visited_sum_ids)
+        assert len(visited_sum_ids) <= SUM_AMOUNT
+        assert all(isinstance(sum_id, int) for sum_id in visited_sum_ids)
+        assert all(0 <= sum_id < SUM_AMOUNT for sum_id in visited_sum_ids)
+
         if len(visited_sum_ids) >= SUM_AMOUNT:
             return
 
@@ -115,6 +153,13 @@ class SumFilter:
         query_id = message_protocol.internal.get_query_id(internal_message)
         payload = message_protocol.internal.get_payload(internal_message) or {}
         visited_sum_ids = list(payload.get("visited_sum_ids", []))
+
+        assert isinstance(payload, dict)
+        assert isinstance(visited_sum_ids, list)
+        assert len(set(visited_sum_ids)) == len(visited_sum_ids)
+        assert len(visited_sum_ids) <= SUM_AMOUNT
+        assert all(isinstance(sum_id, int) for sum_id in visited_sum_ids)
+        assert all(0 <= sum_id < SUM_AMOUNT for sum_id in visited_sum_ids)
 
         logging.info(
             "Processing EOF token for query %s with visited sums %s",
@@ -136,9 +181,21 @@ class SumFilter:
     def process_data_messsage(self, message, ack, nack):
         try:
             internal_message = message_protocol.internal.deserialize(message)
+            source = message_protocol.internal.get_source(internal_message)
+
+            assert source["role"] in {
+                message_protocol.internal.ROLE_GATEWAY,
+                message_protocol.internal.ROLE_SUM,
+                message_protocol.internal.ROLE_AGGREGATION,
+                message_protocol.internal.ROLE_JOIN,
+            }
 
             if message_protocol.internal.is_data_message(internal_message):
                 payload = message_protocol.internal.get_payload(internal_message)
+                assert isinstance(payload, dict)
+                assert "fruit" in payload
+                assert "amount" in payload
+
                 self._process_data(
                     message_protocol.internal.get_query_id(internal_message),
                     payload["fruit"],
