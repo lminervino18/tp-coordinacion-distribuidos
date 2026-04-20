@@ -31,6 +31,17 @@ class SumFilter:
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
+        self.input_queue.register_extra_consumer(
+            f"{SUM_PREFIX}_close_{ID}",
+            self.process_close_message,
+        )
+
+        self.close_senders = [
+            middleware.MessageMiddlewareQueueRabbitMQ(
+                MOM_HOST, f"{SUM_PREFIX}_close_{i}"
+            )
+            for i in range(SUM_AMOUNT)
+        ]
 
         self.data_output_exchanges = []
         for i in range(AGGREGATION_AMOUNT):
@@ -127,66 +138,59 @@ class SumFilter:
             query_id,
             message_protocol.internal.ROLE_SUM,
             ID,
-            [],
         )
         serialized_eof = message_protocol.internal.serialize(eof_message)
 
         for data_output_exchange in self.data_output_exchanges:
             data_output_exchange.send(serialized_eof)
 
-    def _requeue_eof_token(self, query_id, visited_sum_ids):
+    def _dispatch_close_notices(self, query_id):
         assert isinstance(query_id, str)
         assert query_id
-        assert isinstance(visited_sum_ids, list)
-        assert len(set(visited_sum_ids)) == len(visited_sum_ids)
-        assert len(visited_sum_ids) <= SUM_AMOUNT
-        assert all(isinstance(sum_id, int) for sum_id in visited_sum_ids)
-        assert all(0 <= sum_id < SUM_AMOUNT for sum_id in visited_sum_ids)
 
-        if len(visited_sum_ids) >= SUM_AMOUNT:
-            logging.info("EOF token completed traversal for query %s", query_id)
-            return
+        logging.info("Dispatching close notices for query %s", query_id)
 
-        eof_message = message_protocol.internal.build_eof_message(
+        close_notice = message_protocol.internal.build_eof_message(
             query_id,
-            message_protocol.internal.ROLE_GATEWAY,
-            None,
-            visited_sum_ids,
+            message_protocol.internal.ROLE_SUM,
+            ID,
         )
-        self.input_queue.send(message_protocol.internal.serialize(eof_message))
+        serialized_notice = message_protocol.internal.serialize(close_notice)
+
+        for close_sender in self.close_senders:
+            close_sender.send(serialized_notice)
 
     def _process_eof(self, internal_message):
         self._cleanup_closed_queries()
 
         query_id = message_protocol.internal.get_query_id(internal_message)
-        payload = message_protocol.internal.get_payload(internal_message) or {}
-        visited_sum_ids = list(payload.get("visited_sum_ids", []))
 
-        assert isinstance(payload, dict)
-        assert isinstance(visited_sum_ids, list)
-        assert len(set(visited_sum_ids)) == len(visited_sum_ids)
-        assert len(visited_sum_ids) <= SUM_AMOUNT
-        assert all(isinstance(sum_id, int) for sum_id in visited_sum_ids)
-        assert all(0 <= sum_id < SUM_AMOUNT for sum_id in visited_sum_ids)
+        logging.info("Processing EOF for query %s, dispatching close notices", query_id)
 
-        # The EOF token traverses the shared input queue so each sum closes exactly once
-        # while preserving the relative order between data and query termination.
-        logging.info(
-            "Processing EOF token for query %s with visited sums %s",
-            query_id,
-            visited_sum_ids,
-        )
+        self._dispatch_close_notices(query_id)
 
-        if ID in visited_sum_ids:
-            self._requeue_eof_token(query_id, visited_sum_ids)
-            return
+    def process_close_message(self, message, ack, nack):
+        try:
+            internal_message = message_protocol.internal.deserialize(message)
+            query_id = message_protocol.internal.get_query_id(internal_message)
 
-        self._emit_query_results(query_id)
-        self._emit_eof_to_aggregations(query_id)
-        self.closed_queries[query_id] = time.monotonic()
+            self._cleanup_closed_queries()
 
-        visited_sum_ids.append(ID)
-        self._requeue_eof_token(query_id, visited_sum_ids)
+            if query_id in self.closed_queries:
+                logging.debug("Ignoring duplicate close notice for query %s", query_id)
+                ack()
+                return
+
+            logging.info("Processing close notice for query %s", query_id)
+
+            self._emit_query_results(query_id)
+            self._emit_eof_to_aggregations(query_id)
+            self.closed_queries[query_id] = time.monotonic()
+
+            ack()
+        except Exception as exc:
+            logging.error(exc)
+            nack()
 
     def process_data_messsage(self, message, ack, nack):
         try:
@@ -240,6 +244,13 @@ class SumFilter:
         except Exception as exc:
             logging.error(exc)
             close_errors.append(exc)
+
+        for close_sender in self.close_senders:
+            try:
+                close_sender.close()
+            except Exception as exc:
+                logging.error(exc)
+                close_errors.append(exc)
 
         for data_output_exchange in self.data_output_exchanges:
             try:

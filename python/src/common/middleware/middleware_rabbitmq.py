@@ -64,7 +64,7 @@ def _build_ack_handlers(channel, delivery_tag):
         try:
             channel.basic_ack(delivery_tag=delivery_tag)
             handled = True
-        except Exception as exc:  
+        except Exception as exc:
             _raise_runtime_error(exc)
 
     def nack():
@@ -74,7 +74,7 @@ def _build_ack_handlers(channel, delivery_tag):
         try:
             channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
             handled = True
-        except Exception as exc:  
+        except Exception as exc:
             _raise_runtime_error(exc)
 
     return ack, nack
@@ -304,6 +304,7 @@ class MessageMiddlewareQueueRabbitMQ(
 ):
     def __init__(self, host, queue_name):
         self.queue_name = queue_name
+        self._extra_consumers = []
         self._init_runtime_state(host)
         self._connect()
         self._redeclare_topology()
@@ -313,8 +314,29 @@ class MessageMiddlewareQueueRabbitMQ(
         assert self.channel is not None
         self.channel.queue_declare(queue=self.queue_name, durable=True)
 
+    def register_extra_consumer(self, extra_queue_name, callback):
+        self._extra_consumers.append((extra_queue_name, callback))
+
     def start_consuming(self, on_message_callback):
         self._prepare_consumer(self.queue_name, on_message_callback)
+
+        for extra_queue_name, extra_callback in self._extra_consumers:
+            self._ensure_consumer_channel()
+            assert self.channel is not None
+            self.channel.queue_declare(queue=extra_queue_name, durable=True)
+
+            def make_internal_callback(cb):
+                def internal_callback(ch, method, properties, body):
+                    ack, nack = _build_ack_handlers(ch, method.delivery_tag)
+                    cb(body, ack, nack)
+                return internal_callback
+
+            self.channel.basic_consume(
+                queue=extra_queue_name,
+                on_message_callback=make_internal_callback(extra_callback),
+                auto_ack=False,
+            )
+
         self._run_consumer_loop()
 
     def send(self, message):
