@@ -21,7 +21,7 @@ from .middleware import (
     MessageMiddlewareQueue,
 )
 
-_PREFETCH_COUNT = 1
+_PREFETCH_COUNT = 10
 _PERSISTENT_MESSAGE_PROPERTIES = pika.BasicProperties(delivery_mode=2)
 
 _HEARTBEAT_SECONDS = 30
