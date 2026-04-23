@@ -73,8 +73,7 @@ class AggregationFilter:
         logging.info("Emitting partial top for query %s", query_id)
 
         query_amounts = self.amount_by_fruit_by_query.get(query_id, {})
-        fruit_items = sorted(query_amounts.values(), reverse=True)
-        fruit_items = fruit_items[:TOP_SIZE]
+        fruit_items = sorted(query_amounts.values(), reverse=True)[:TOP_SIZE]
 
         assert len(fruit_items) <= TOP_SIZE
 

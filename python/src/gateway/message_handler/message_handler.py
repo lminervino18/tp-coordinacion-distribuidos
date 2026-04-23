@@ -6,9 +6,11 @@ from common import message_protocol
 class MessageHandler:
     def __init__(self):
         self.query_id = str(uuid.uuid4())
+        self._data_count = 0
 
     def serialize_data_message(self, message):
         fruit, amount = message
+        self._data_count += 1
 
         internal_message = message_protocol.internal.build_data_message(
             self.query_id,
@@ -23,6 +25,7 @@ class MessageHandler:
             self.query_id,
             message_protocol.internal.ROLE_GATEWAY,
             None,
+            total_sent=self._data_count,
         )
 
         return message_protocol.internal.serialize(internal_message)

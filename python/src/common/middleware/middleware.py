@@ -54,7 +54,7 @@ class MessageMiddleware(ABC):
 
 class MessageMiddlewareExchange(MessageMiddleware):
     @abstractmethod
-    def __init__(self, host, exchange_name, route_keys):
+    def __init__(self, host, exchange_name, route_keys, exchange_type="direct"):
         pass
 
 

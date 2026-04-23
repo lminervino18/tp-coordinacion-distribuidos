@@ -314,16 +314,23 @@ class MessageMiddlewareQueueRabbitMQ(
         assert self.channel is not None
         self.channel.queue_declare(queue=self.queue_name, durable=True)
 
-    def register_extra_consumer(self, extra_queue_name, callback):
-        self._extra_consumers.append((extra_queue_name, callback))
+    def register_extra_consumer(self, extra_queue_name, callback, exchange_name=None):
+        self._extra_consumers.append((extra_queue_name, callback, exchange_name))
 
     def start_consuming(self, on_message_callback):
         self._prepare_consumer(self.queue_name, on_message_callback)
 
-        for extra_queue_name, extra_callback in self._extra_consumers:
+        for extra_queue_name, extra_callback, exchange_name in self._extra_consumers:
             self._ensure_consumer_channel()
             assert self.channel is not None
             self.channel.queue_declare(queue=extra_queue_name, durable=True)
+
+            if exchange_name is not None:
+                self.channel.queue_bind(
+                    exchange=exchange_name,
+                    queue=extra_queue_name,
+                    routing_key=extra_queue_name,
+                )
 
             def make_internal_callback(cb):
                 def internal_callback(ch, method, properties, body):
@@ -339,16 +346,17 @@ class MessageMiddlewareQueueRabbitMQ(
 
         self._run_consumer_loop()
 
-    def send(self, message):
+    def send(self, message, routing_key=None):
         self._publish(exchange="", routing_key=self.queue_name, message=message)
 
 
 class MessageMiddlewareExchangeRabbitMQ(
     _RabbitMQMiddlewareBase, MessageMiddlewareExchange
 ):
-    def __init__(self, host, exchange_name, routing_keys):
+    def __init__(self, host, exchange_name, routing_keys, exchange_type="direct"):
         self.exchange_name = exchange_name
         self.routing_keys = list(routing_keys)
+        self.exchange_type = exchange_type
         self.queue_name = None
         self._consumer_queue_initialized = False
 
@@ -361,26 +369,31 @@ class MessageMiddlewareExchangeRabbitMQ(
         assert self.channel is not None
         self.channel.exchange_declare(
             exchange=self.exchange_name,
-            exchange_type="direct",
+            exchange_type=self.exchange_type,
             durable=True,
         )
 
     def _create_and_bind_consumer_queue(self) -> None:
-        assert self.routing_keys
-        if not self.routing_keys:
-            raise MessageMiddlewareMessageError()
-
         self._ensure_consumer_channel()
         assert self.channel is not None
         result = self.channel.queue_declare(queue="", exclusive=True)
         self.queue_name = result.method.queue
 
-        for routing_key in self.routing_keys:
+        if self.exchange_type == "fanout":
             self.channel.queue_bind(
                 exchange=self.exchange_name,
                 queue=self.queue_name,
-                routing_key=routing_key,
+                routing_key="",
             )
+        else:
+            if not self.routing_keys:
+                raise MessageMiddlewareMessageError()
+            for routing_key in self.routing_keys:
+                self.channel.queue_bind(
+                    exchange=self.exchange_name,
+                    queue=self.queue_name,
+                    routing_key=routing_key,
+                )
 
         self._consumer_queue_initialized = True
 
@@ -406,14 +419,13 @@ class MessageMiddlewareExchangeRabbitMQ(
         self._prepare_consumer(self.queue_name, on_message_callback)
         self._run_consumer_loop()
 
-    def send(self, message):
-        assert self.routing_keys
-        if not self.routing_keys:
-            raise MessageMiddlewareMessageError()
-
-        for routing_key in self.routing_keys:
-            self._publish(
-                exchange=self.exchange_name,
-                routing_key=routing_key,
-                message=message,
-            )
+    def send(self, message, routing_key=None):
+        if self.exchange_type == "fanout":
+            self._publish(exchange=self.exchange_name, routing_key="", message=message)
+        elif routing_key is not None:
+            self._publish(exchange=self.exchange_name, routing_key=routing_key, message=message)
+        else:
+            if not self.routing_keys:
+                raise MessageMiddlewareMessageError()
+            for rk in self.routing_keys:
+                self._publish(exchange=self.exchange_name, routing_key=rk, message=message)
